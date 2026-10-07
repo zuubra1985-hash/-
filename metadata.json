@@ -1,0 +1,6 @@
+{
+  "name": "Personal AI Agent Factory",
+  "description": "AI Operating System with Telegram control, GitHub repository persistence, multi-agent orchestration, and measurable self-improvement loops.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
