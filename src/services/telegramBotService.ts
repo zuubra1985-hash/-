@@ -26,7 +26,7 @@ export function getBotInfo(): TelegramBotInfo {
   return botInfo;
 }
 
-// Split long text into Telegram-friendly chunks (max 4000 characters)
+// Split text into chunks < 4000 chars for Telegram
 function splitTextChunks(text: string, maxLength = 4000): string[] {
   if (text.length <= maxLength) return [text];
   const chunks: string[] = [];
@@ -46,34 +46,32 @@ function splitTextChunks(text: string, maxLength = 4000): string[] {
   return chunks;
 }
 
+export async function sendTypingAction(token: string, chatId: number | string) {
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, action: 'typing' })
+    });
+  } catch {
+    // Ignore
+  }
+}
+
 export async function sendMessageToTelegram(
   token: string,
   chatId: number | string,
-  text: string,
-  buttons?: { label: string; action: string }[]
+  text: string
 ): Promise<boolean> {
   try {
     const chunks = splitTextChunks(text, 3900);
 
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      const isLast = i === chunks.length - 1;
-
-      const payload: any = {
+    for (const chunk of chunks) {
+      const payload = {
         chat_id: chatId,
         text: chunk
       };
 
-      // Add buttons only to the final chunk
-      if (isLast && buttons && buttons.length > 0) {
-        payload.reply_markup = {
-          inline_keyboard: buttons.slice(0, 5).map((b) => [
-            { text: b.label, callback_data: b.action.slice(0, 64) }
-          ])
-        };
-      }
-
-      // First attempt: try without formatting or markdown to prevent parsing drops
       const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -84,44 +82,25 @@ export async function sendMessageToTelegram(
       if (data.ok) {
         botInfo.messages_sent_count += 1;
       } else {
-        console.warn(`[Telegram] Send message attempt warning:`, data);
-        // Retry with plain text and no reply_markup if that caused issues
-        delete payload.reply_markup;
-        const retryRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        const retryData: any = await retryRes.json();
-        if (retryData.ok) {
-          botInfo.messages_sent_count += 1;
-        } else {
-          console.error(`[Telegram] Send failed completely:`, retryData);
-          return false;
-        }
+        console.warn('[Telegram] sendMessage failed:', data);
+        return false;
       }
     }
     return true;
   } catch (err: any) {
-    console.error('[Telegram] Failed to send message exception:', err);
+    console.error('[Telegram] Failed to send message:', err);
     botInfo.error = err?.message || 'Network send error';
     return false;
   }
 }
 
-// Register native commands in Telegram
 async function registerBotCommands(token: string) {
   try {
     const commands = [
-      { command: 'start', description: 'Главное меню Master Agent' },
-      { command: 'status', description: 'Состояние фабрики и метрики' },
-      { command: 'agents', description: 'Список специализированных агентов' },
-      { command: 'tasks', description: 'История задач и пайплайнов' },
-      { command: 'memory', description: '7-уровневая проверенная память' },
-      { command: 'errors', description: 'База ошибок и Root Cause Analysis' },
-      { command: 'improve', description: 'Запуск оптимизатора агента' },
-      { command: 'test', description: 'Запуск тестового набора' },
-      { command: 'evolve', description: 'Автономный цикл эволюции' }
+      { command: 'start', description: 'Начать общение с Miu' },
+      { command: 'memory', description: 'Посмотреть что агент помнит о вас' },
+      { command: 'reset', description: 'Очистить историю текущего диалога' },
+      { command: 'help', description: 'Возможности персонального агента' }
     ];
 
     await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
@@ -129,7 +108,7 @@ async function registerBotCommands(token: string) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ commands })
     });
-    console.log('[Telegram] Native bot commands registered successfully.');
+    console.log('[Telegram] Commands registered.');
   } catch (err) {
     console.warn('[Telegram] Could not register commands:', err);
   }
@@ -141,17 +120,16 @@ export function startTelegramPolling(params: {
     userText: string,
     chatId: number | string,
     fromName: string
-  ) => Promise<string | { replyText: string; buttons?: { label: string; action: string }[] }>;
+  ) => Promise<string>;
 }) {
   if (pollingActive) {
-    console.log('[Telegram] Polling is already active.');
     return;
   }
   pollingActive = true;
 
   const { token, onIncomingMessage } = params;
 
-  // 1. Initial bot validation & registration
+  // 1. Initial check
   fetch(`https://api.telegram.org/bot${token}/getMe`)
     .then((res) => res.json())
     .then((data: any) => {
@@ -164,27 +142,24 @@ export function startTelegramPolling(params: {
           is_connected: true,
           error: undefined
         };
-        console.log(`[Telegram] ✅ Bot connected: @${data.result.username} (ID: ${data.result.id})`);
+        console.log(`[Telegram] ✅ Connected to @${data.result.username} (${data.result.first_name})`);
         registerBotCommands(token);
       } else {
         botInfo.is_connected = false;
         botInfo.error = data.description || 'Invalid token';
-        console.error('[Telegram] ❌ getMe failed:', data);
       }
     })
     .catch((err) => {
       botInfo.is_connected = false;
       botInfo.error = err.message;
-      console.error('[Telegram] ❌ getMe network error:', err);
     });
 
-  // 2. Continuous long polling loop
+  // 2. Long polling loop
   const poll = async () => {
-    console.log('[Telegram] 🚀 Long polling loop started.');
     while (pollingActive) {
       try {
         botInfo.last_poll_time = new Date().toLocaleTimeString('ru-RU');
-        const url = `https://api.telegram.org/bot${token}/getUpdates?offset=${lastUpdateId + 1}&timeout=15`;
+        const url = `https://api.telegram.org/bot${token}/getUpdates?offset=${lastUpdateId + 1}&timeout=20`;
         const res = await fetch(url);
         const data: any = await res.json();
 
@@ -195,7 +170,7 @@ export function startTelegramPolling(params: {
 
             let incomingText = '';
             let chatId: number | string = '';
-            let fromName = 'Пользователь Telegram';
+            let fromName = 'Пользователь';
 
             if (update.message) {
               incomingText = update.message.text || update.message.caption || '';
@@ -204,57 +179,24 @@ export function startTelegramPolling(params: {
                 update.message.from?.first_name ||
                 update.message.from?.username ||
                 'Пользователь';
-            } else if (update.callback_query && update.callback_query.data) {
-              incomingText = update.callback_query.data;
-              chatId = update.callback_query.message?.chat?.id || update.callback_query.from.id;
-              fromName =
-                update.callback_query.from?.first_name ||
-                update.callback_query.from?.username ||
-                'Пользователь';
-
-              // Answer callback query to remove spinner in Telegram
-              try {
-                await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ callback_query_id: update.callback_query.id })
-                });
-              } catch {
-                // Ignore
-              }
             }
 
             if (incomingText && chatId) {
               botInfo.last_chat_id = chatId;
-              console.log(`[Telegram] 📩 Received from @${fromName}: "${incomingText}"`);
+              console.log(`[Telegram] 📩 From ${fromName}: "${incomingText}"`);
 
-              // Process via Master Agent
-              const result = await onIncomingMessage(incomingText, chatId, fromName);
+              // Show typing indicator in Telegram
+              sendTypingAction(token, chatId);
 
-              let replyText = '';
-              let replyButtons: { label: string; action: string }[] | undefined = undefined;
+              // Process via agent and Gemini
+              const replyText = await onIncomingMessage(incomingText, chatId, fromName);
 
-              if (typeof result === 'string') {
-                replyText = result;
-              } else {
-                replyText = result.replyText;
-                replyButtons = result.buttons;
-              }
-
-              if (!replyButtons || replyButtons.length === 0) {
-                replyButtons = [
-                  { label: '📊 /status', action: '/status' },
-                  { label: '🤖 /agents', action: '/agents' },
-                  { label: '🧬 /evolve grant_reviewer', action: '/evolve grant_reviewer' }
-                ];
-              }
-
-              await sendMessageToTelegram(token, chatId, replyText, replyButtons);
+              // Send back to Telegram
+              await sendMessageToTelegram(token, chatId, replyText);
             }
           }
         }
-      } catch (pollErr: any) {
-        console.warn('[Telegram] Polling warning, retrying in 3s:', pollErr?.message);
+      } catch (err: any) {
         await new Promise((resolve) => setTimeout(resolve, 3000));
       }
     }
@@ -266,5 +208,4 @@ export function startTelegramPolling(params: {
 export function stopTelegramPolling() {
   pollingActive = false;
   botInfo.is_connected = false;
-  console.log('[Telegram] Polling stopped.');
 }

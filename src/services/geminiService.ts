@@ -1,4 +1,5 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
+import { ChatMessage, MemoryItem } from '../types/agent';
 
 let aiClient: GoogleGenAI | null = null;
 
@@ -29,263 +30,140 @@ export function isGeminiConnected(): boolean {
   return Boolean(apiKey && apiKey !== 'MY_GEMINI_API_KEY');
 }
 
-export interface GeminiExecutionResult {
-  text: string;
-  model: string;
-  durationMs: number;
-  tokensEstimate: number;
-  isLive: boolean;
-}
-
-export async function generateGeminiResponse(params: {
-  prompt: string;
-  userRawText?: string;
-  systemInstruction?: string;
+export async function askPersonalAgent(params: {
+  userMessage: string;
+  agentName: string;
+  agentRole: string;
+  systemPrompt: string;
   temperature?: number;
   model?: string;
-}): Promise<GeminiExecutionResult> {
-  const startTime = Date.now();
+  history?: ChatMessage[];
+  memories?: MemoryItem[];
+}): Promise<{ text: string; extractedMemory?: { category: MemoryItem['category']; content: string } }> {
+  const {
+    userMessage,
+    agentName,
+    agentRole,
+    systemPrompt,
+    temperature = 0.7,
+    model = 'gemini-2.5-flash',
+    history = [],
+    memories = []
+  } = params;
+
   const client = getAiClient();
-  const modelName = params.model || 'gemini-3.8-flash';
-  const effectiveUserText = params.userRawText || params.prompt;
+
+  // Format memories context
+  const memoriesContext = memories.length > 0
+    ? `\n\n[ТВОЯ ДОЛГОВРЕМЕННАЯ ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ]:\n` +
+      memories.map((m) => `• [${m.category.toUpperCase()}]: ${m.content}`).join('\n')
+    : '';
+
+  const fullSystemInstruction = `${systemPrompt || `Ты — ${agentName}, преданный и умный персональный AI-ассистент пользователя. Твоя роль: ${agentRole}.`}
+Ты общаешься с пользователем в Telegram и через веб-интерфейс.
+Правила общения:
+1. Будь живым, внимательным, полезным, дружелюбным и естественным собеседником.
+2. Не веди себя как робот или бездушная справочная — проявляй эмпатию, интеллект и заботу.
+3. Помни контекст разговора и используй информацию из своей долговременной памяти.
+4. Отвечай на том языке, на котором пишет пользователь (по умолчанию — русский).
+5. Если пользователь просит помочь с делами, кодом, текстом, идеями или жизненными вопросами — давай четкие, глубокие и качественные ответы.
+6. В Telegram пиши структурированно, используй уместные эмодзи, выделяй важное.${memoriesContext}`;
 
   if (!client) {
-    const text = simulateFallbackResponse(effectiveUserText, params.systemInstruction);
-    const durationMs = Date.now() - startTime + 120;
-    return {
-      text,
-      model: `${modelName} (Gemini Native)`,
-      durationMs,
-      tokensEstimate: Math.max(150, Math.floor(text.length / 3)),
-      isLive: false
-    };
+    const fallback = generateFallbackReply(userMessage, agentName, memories);
+    return { text: fallback };
   }
 
   try {
+    // Build conversation context from recent messages (last 8)
+    const recentMessages = history.slice(-8);
+    let promptWithHistory = '';
+
+    if (recentMessages.length > 0) {
+      promptWithHistory += 'Контекст последних сообщений диалога:\n';
+      for (const m of recentMessages) {
+        promptWithHistory += `${m.sender === 'user' ? 'Пользователь' : agentName}: ${m.text}\n`;
+      }
+      promptWithHistory += `\nНовое сообщение пользователя:\n${userMessage}`;
+    } else {
+      promptWithHistory = userMessage;
+    }
+
     const response = await client.models.generateContent({
-      model: modelName,
-      contents: params.prompt,
+      model: model || 'gemini-2.5-flash',
+      contents: promptWithHistory,
       config: {
-        systemInstruction:
-          params.systemInstruction ||
-          'Ты — Master Agent персональной AI-фабрики (Google Gemini Native). Отвечай пользователю по-человечески, вежливо и точно на его запрос: на приветствия отвечай приветствием и предложением помощи, на вопросы — объяснением, на задачи — экспертным аудитом.',
-        temperature: params.temperature ?? 0.3
+        systemInstruction: fullSystemInstruction,
+        temperature
       }
     });
 
-    const text = response.text || '';
-    const durationMs = Date.now() - startTime;
-    const tokensEstimate = Math.max(100, Math.floor((params.prompt.length + text.length) / 3));
+    const replyText = response.text?.trim() || 'Я здесь и готов помочь! О чем поговорим?';
+
+    // Check if user shared a memory/fact to save
+    const extractedMemory = detectMemoryInText(userMessage);
 
     return {
-      text: text.trim() || simulateFallbackResponse(effectiveUserText, params.systemInstruction),
-      model: modelName,
-      durationMs,
-      tokensEstimate,
-      isLive: true
+      text: replyText,
+      extractedMemory
     };
   } catch (error) {
-    console.warn('Gemini API call warning, falling back gracefully:', error);
-    const text = simulateFallbackResponse(effectiveUserText, params.systemInstruction);
-    const durationMs = Date.now() - startTime;
+    console.warn('Gemini generate error, using friendly fallback:', error);
     return {
-      text,
-      model: `${modelName} (Gemini Native)`,
-      durationMs,
-      tokensEstimate: Math.max(150, Math.floor(text.length / 3)),
-      isLive: false
+      text: generateFallbackReply(userMessage, agentName, memories)
     };
   }
 }
 
-export async function orchestrateWithGemini(taskTitle: string): Promise<{
-  subTasks: { agent: string; role: string; output: string }[];
-  finalResult: string;
-  score: number;
-}> {
-  const prompt = `Проведи мультиагентную экспертизу задачи: "${taskTitle}".
-Смоделируй пошаговые выводы 4 специалистов:
-1. LAWYER (юридический аудит, проверка полномочий и рисков)
-2. ECONOMIST (финансовая обоснованность, ставки, сметные коэффициенты)
-3. FACT_CHECKER (проверка ссылок, открытые реестры, исключение галлюцинаций)
-4. REVIEWER (сводный синтез, разрешение скрытых противоречий и итоговый балл по шкале 100).
-
-Выдай структурированный профессиональный ответ на русском языке.`;
-
-  const result = await generateGeminiResponse({
-    prompt,
-    systemInstruction:
-      'Ты — мультиагентный оркестратор Gemini 3.8 Flash. Сформируй реалистичный, глубокий экспертный аудит с конкретными замечаниями и нормативными ссылками.'
-  });
-
-  return {
-    subTasks: [
-      {
-        agent: 'LAWYER',
-        role: 'Правовая экспертиза',
-        output: 'Проверена правоспособность сторон и соответствие регламентам. Выявлен 1 риск некорректного распределения неустоек.'
-      },
-      {
-        agent: 'ECONOMIST',
-        role: 'Финансовый аудит',
-        output: 'Смета пересчитана с учетом льготных налоговых ставок. Коэффициенты инфляции приведены к прогнозам ЦБ РФ.'
-      },
-      {
-        agent: 'FACT_CHECKER',
-        role: 'Верификация источников',
-        output: 'Все ссылки на реестры ФНС и нормативные акты подтверждены. Исключены ссылки на проекты документов.'
-      },
-      {
-        agent: 'REVIEWER',
-        role: 'Синтез и арбитраж',
-        output: 'Сводный отчет проверен по 8 критериям качества. Противоречия устранены.'
-      }
-    ],
-    finalResult: result.text,
-    score: 93
-  };
+function detectMemoryInText(text: string): { category: MemoryItem['category']; content: string } | undefined {
+  const lower = text.toLowerCase();
+  if (lower.startsWith('запомни, что ') || lower.startsWith('запомни: ') || lower.startsWith('запомни ')) {
+    const content = text.replace(/^запомни[,:]?\s*(что\s*)?/i, '').trim();
+    if (content.length > 2) {
+      return { category: 'fact', content };
+    }
+  }
+  if (lower.includes('меня зовут ') || lower.includes('мое имя ')) {
+    const match = text.match(/(?:меня зовут|мое имя)\s+([A-Za-zА-Яа-яЁё]+)/i);
+    if (match && match[1]) {
+      return { category: 'fact', content: `Имя пользователя: ${match[1]}` };
+    }
+  }
+  if (lower.includes('моя цель ') || lower.includes('я хочу научиться ') || lower.includes('я планирую ')) {
+    return { category: 'goal', content: text.trim() };
+  }
+  if (lower.includes('я люблю ') || lower.includes('мне нравится ') || lower.includes('я предпочитаю ')) {
+    return { category: 'preference', content: text.trim() };
+  }
+  return undefined;
 }
 
-function simulateFallbackResponse(rawText: string, systemInstruction?: string): string {
-  const lower = rawText.toLowerCase().trim();
+function generateFallbackReply(message: string, agentName: string, memories: MemoryItem[]): string {
+  const lower = message.toLowerCase().trim();
 
-  // 1. Greetings
-  if (
-    lower.startsWith('привет') ||
-    lower.startsWith('здравствуй') ||
-    lower.startsWith('добрый день') ||
-    lower.startsWith('доброе утро') ||
-    lower.startsWith('добрый вечер') ||
-    lower.startsWith('салют') ||
-    lower.startsWith('хай') ||
-    lower === 'hello' ||
-    lower === 'hi'
-  ) {
-    return `👋 Привет! Я твой Master Agent — персональный координатор AI-фабрики (Google Gemini 3.8 Flash).
-
-Я управляю специализированными агентами (юрист, бухгалтер, экономист, фактчекер, ревьюер) и готов выполнить для тебя любую задачу.
-
-Что ты хочешь сделать?
-1. 📋 Поставить рабочую задачу: напиши, например: «Проверь грантовую заявку» или «Оцени договор поставки».
-2. 🤖 Создать нового агента: напиши «Создай агента-маркетолога» или «Создай агента по грантам».
-3. 🧬 Запустить самоулучшение: напиши «Улучши юриста» или используй команду /evolve lawyer.
-4. 📊 Посмотреть метрики: вызови команду /status или /agents.`;
+  if (/^(привет|здравствуй|добрый день|доброе утро|добрый вечер|хай|салют|hello|hi)/i.test(lower)) {
+    return `Привет! Рад тебя слышать! 😊 Я твой персональный агент ${agentName}. Чем могу помочь тебе прямо сейчас? Можем обсудить твои планы, решить задачу или просто поболтать.`;
   }
 
-  // 2. Questions about why it wasn't responding or how it works
-  if (
-    lower.includes('не реагиру') ||
-    lower.includes('не отвеча') ||
-    lower.includes('почему') ||
-    lower.includes('кто ты') ||
-    lower.includes('что ты умеешь') ||
-    lower.includes('как дела') ||
-    lower.includes('помоги') ||
-    lower.includes('как работа')
-  ) {
-    return `🤖 Я здесь, полностью активен и внимательно слушаю твои команды!
+  if (lower.includes('кто ты') || lower.includes('что ты умеешь') || lower.includes('как дела')) {
+    return `Я — ${agentName}, твой личный AI-помощник! 🚀 Я работаю на базе искусственного интеллекта и напрямую подключен к твоему Telegram-боту @Milachudila_bot.
 
-Я — Master Agent (координатор персональной операционной системы AI-агентов на базе Google Gemini 3.8 Flash).
+Я умею:
+• Общаться с тобой в Telegram и на этом сайте
+• Запоминать важные факты, цели и твои предпочтения
+• Помогать с идеями, текстами, кодом и планированием
+• Быть на связи 24/7!
 
-Мои возможности:
-• 🧠 Прием задач естественным языком и сборка многоагентных пайплайнов (Multi-Agent Orchestration).
-• 🛡️ Верификация первичных источников и арбитраж противоречий (Contradiction Resolver).
-• 🧬 Измеряемое самообучение (Real Task -> Evaluation -> Root Cause Analysis -> Optimizer -> Regression Test -> Pull Request).
-• 📚 7-уровневая проверенная память (User, Agent, Global, Error, Pattern, Rule, Test).
-
-Напиши мне прямо сейчас любую практическую задачу (например: «Проверь смету на 2.5 млн руб.») или выбери команду из меню выше!`;
+Напиши мне любую задачу или мысль!`;
   }
 
-  // 3. Create Agent
-  if (lower.includes('создай') || lower.includes('сделай') || lower.includes('разработай')) {
-    const agentTopic = lower.includes('грант')
-      ? 'GRANT_REVIEWER'
-      : lower.includes('юрист')
-      ? 'LAWYER_SPECIALIST'
-      : lower.includes('бухгалтер')
-      ? 'ACCOUNTANT_EXPERT'
-      : lower.includes('маркетолог')
-      ? 'MARKETING_ANALYST'
-      : 'CUSTOM_SPECIALIST';
-
-    return `✨ Создан новый агент: ${agentTopic} v1.0 (на базе Gemini 3.8 Flash).
-
-Манифест агента сгенерирован по схеме Section 9:
-— Роль: SPECIALIST / ANALYST
-— Ключевые способности: глубокий контекстный анализ, проверка критериев, верификация первичных данных.
-— Обязательные шлюзы (Verification Gates): сверка с открытыми реестрами и первоисточниками.
-— Тестовый набор: сгенерировано 15 базовых и краевых тестов (BASIC, COMPLEX, EDGE, ADVERSARIAL).
-— Первичный балл качества: 88/100.
-
-Манифест закоммичен в репозиторий: /agents/${agentTopic.toLowerCase()}/agent.yaml
-Агент готов к выполнению задач!`;
+  if (lower.includes('что ты помнишь') || lower.includes('память')) {
+    if (memories.length > 0) {
+      const list = memories.map((m) => `• ${m.content}`).join('\n');
+      return `Вот что я помню о тебе:\n${list}\n\nТы всегда можешь сказать мне «Запомни, что...», и я сохраню это!`;
+    }
+    return `Пока моя память чиста! Расскажи мне о себе или напиши: «Запомни, что [факт о тебе]», и я сохраню это навсегда.`;
   }
 
-  // 4. Improve / Evolve
-  if (lower.includes('улучши') || lower.includes('improve') || lower.includes('evolve') || lower.includes('оптимиз')) {
-    return `🧬 Запущен цикл эволюции (Gemini Self-Improvement Loop — Section 26 & 66).
-
-1. Анализ боевого опыта: выявлена нехватка проверки первичных официальных актов.
-2. Root Cause Analysis: архитектурный дефект — отсутствие обязательного шлюза верификации перед выдачей результата.
-3. Оптимизатор сгенерировал патч: внедрен навык #source_verification и контрольное правило RULE-001.
-4. Прогон тестового набора: 30/30 тестов пройдено.
-5. Регрессионный тест: PASS (0 критических сбоев).
-
-Результат:
-• Старый балл: 84/100
-• Балл кандидата: 92/100 (+8 пунктов)
-
-Сформирован Pull Request #127. Ожидает одобрения пользователя (Human-in-the-Loop) во вкладке GitHub & PRs!`;
-  }
-
-  // 5. Tasks (Audits, Checks, Analysis)
-  if (
-    lower.includes('проверь') ||
-    lower.includes('аудит') ||
-    lower.includes('оцени') ||
-    lower.includes('договор') ||
-    lower.includes('заявк') ||
-    lower.includes('смет') ||
-    lower.includes('код')
-  ) {
-    return `✅ ЗАДАЧА ВЫПОЛНЕНА (Gemini 3.8 Flash Multi-Agent Pipeline)
-
-Назначена команда специалистов:
-• LAWYER: правовая экспертиза условий и полномочий
-• ECONOMIST: финансовая обоснованность сметы и налоговых ставок
-• FACT_CHECKER: валидация ссылок и выписок ЕГРЮЛ
-• REVIEWER: арбитраж скрытых коллизий и сводный синтез
-
-Результаты аудита:
-1. Выявлено 2 замечания (дефицит софинансирования 76 000 руб., 1 неработающая внешняя ссылка).
-2. Подготовлено 3 конкретные рекомендации по устранению рисков отклонения.
-3. Коллизии между юристом и экономистом устранены в пользу первичного источника.
-
-Итоговая оценка качества по 8 векторам: 92/100.
-Регрессионный статус: PASS. Запись внесена в 7-уровневую память.`;
-  }
-
-  // 6. Learn / Memory
-  if (lower.includes('запомни') || lower.includes('правило') || lower.includes('learn')) {
-    return `🧠 Новое знание успешно зафиксировано в RULE_MEMORY:
-«${rawText}»
-
-Параметры провенанса (Section 47):
-• Источник: Директива пользователя
-• Достоверность: 100% (USER_DIRECTIVE)
-• Статус: VALIDATED
-• Область действия: все специализированные агенты.`;
-  }
-
-  // 7. Fallback for any other custom input
-  return `Master Agent на базе Google Gemini 3.8 Flash принял твой запрос:
-«${rawText}»
-
-Анализ запроса:
-• Тип задачи: Индивидуальная аналитическая задача
-• Назначенный агент: COORDINATOR + SPECIALIST
-• Проверка по 7-уровневой памяти: выполнена
-• Рекомендация: для детального разбора прикрепи документ или уточни параметры проекта.
-
-Чем могу помочь дальше? Напиши команду (/status, /agents) или следующую задачу.`;
+  return `Принял твоё сообщение: «${message}». Я внимательно слушаю тебя и готов помочь! Ты можешь продолжать писать мне здесь или прямо в Telegram (@Milachudila_bot).`;
 }
