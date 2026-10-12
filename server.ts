@@ -10,7 +10,8 @@ import {
 import {
   startTelegramPolling,
   getBotInfo,
-  sendMessageToTelegram
+  sendMessageToTelegram,
+  sendTypingAction
 } from './src/services/telegramBotService.ts';
 import {
   AgentConfig,
@@ -36,7 +37,7 @@ let agentConfig: AgentConfig = {
 Ты на связи с ним и в Telegram, и на этом сайте.
 Твоя цель — помогать пользователю во всех делах: планировании, творчестве, написании текстов, кодинге, генерации идей, ответах на вопросы и просто душевных беседах.
 Общайся дружелюбно, умно, с поддержкой и уместным юмором. Запоминай всё, чем делится собеседник.`,
-  model: 'gemini-2.5-flash',
+  model: 'gemini-3.8-flash',
   temperature: 0.7,
   telegramBot: {
     username: 'Milachudila_bot',
@@ -259,6 +260,14 @@ app.get('/api/telegram/status', (req, res) => {
   res.json(getBotInfo());
 });
 
+app.get('/api/gemini/status', (req, res) => {
+  res.json({
+    connected: isGeminiConnected(),
+    model: agentConfig.model,
+    hasApiKey: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY')
+  });
+});
+
 app.post('/api/telegram/send', async (req, res) => {
   const { text } = req.body;
   const token = process.env.TELEGRAM_BOT_TOKEN || '8996979262:AAFyMShxryrXpJ39_QuKT0eTZQWdccV6w9U';
@@ -310,6 +319,9 @@ app.listen(PORT, '0.0.0.0', () => {
     token: botToken,
     onIncomingMessage: async (userText, chatId, fromName) => {
       console.log(`[Telegram] Received from ${fromName} (${chatId}): "${userText}"`);
+
+      // Send typing action immediately to Telegram
+      await sendTypingAction(botToken, chatId);
 
       // 1. Record incoming message
       const userMsg: ChatMessage = {

@@ -126,8 +126,8 @@ export const AgentSettingsModal: React.FC<AgentSettingsModalProps> = ({
                 onChange={(e) => setModel(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-slate-100 focus:outline-none focus:border-pink-500"
               >
-                <option value="gemini-2.5-flash">Gemini 2.5 Flash (Быстрая, универсальная)</option>
-                <option value="gemini-3.8-flash">Gemini 3.8 Flash (Продвинутая логика)</option>
+                <option value="gemini-3.8-flash">Gemini 3.8 Flash (Основная, мощный интеллект)</option>
+                <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Глубокие рассуждения и логика)</option>
                 <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (Сверхбыстрая)</option>
               </select>
             </div>

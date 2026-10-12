@@ -4,7 +4,7 @@ export interface AgentConfig {
   avatar: string;
   role: string;
   systemPrompt: string;
-  model: string;
+  model: 'gemini-3.8-flash' | 'gemini-3.1-pro-preview' | 'gemini-3.1-flash-lite' | string;
   temperature: number;
   telegramBot: {
     username: string;
