@@ -5,8 +5,14 @@ import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import {
   askPersonalAgent,
-  isGeminiConnected
+  isGeminiConnected,
+  getActiveAiProviderInfo,
+  saveGeminiApiKey
 } from './src/services/geminiService.ts';
+import {
+  isOpenRouterConnected,
+  saveOpenRouterApiKey
+} from './src/services/openRouterService.ts';
 import {
   startTelegramPolling,
   getBotInfo,
@@ -37,7 +43,8 @@ let agentConfig: AgentConfig = {
 Ты на связи с ним и в Telegram, и на этом сайте.
 Твоя цель — помогать пользователю во всех делах: планировании, творчестве, написании текстов, кодинге, генерации идей, ответах на вопросы и просто душевных беседах.
 Общайся дружелюбно, умно, с поддержкой и уместным юмором. Запоминай всё, чем делится собеседник.`,
-  model: 'gemini-3.8-flash',
+  model: 'deepseek/deepseek-chat',
+  provider: 'openrouter',
   temperature: 0.7,
   telegramBot: {
     username: 'Milachudila_bot',
@@ -165,7 +172,9 @@ app.get('/api/agent', (req, res) => {
     agentConfig,
     messages,
     memories,
-    geminiConnected: isGeminiConnected()
+    geminiConnected: isGeminiConnected(),
+    openrouterConnected: isOpenRouterConnected(),
+    aiStatus: getActiveAiProviderInfo()
   });
 });
 
@@ -265,6 +274,19 @@ app.get('/api/gemini/status', (req, res) => {
     connected: isGeminiConnected(),
     model: agentConfig.model,
     hasApiKey: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY')
+  });
+});
+
+app.get('/api/ai/status', (req, res) => {
+  res.json({
+    active: getActiveAiProviderInfo(),
+    openrouter: {
+      connected: isOpenRouterConnected(),
+      model: agentConfig.model
+    },
+    gemini: {
+      connected: isGeminiConnected()
+    }
   });
 });
 

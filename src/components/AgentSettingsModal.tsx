@@ -126,9 +126,17 @@ export const AgentSettingsModal: React.FC<AgentSettingsModalProps> = ({
                 onChange={(e) => setModel(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-slate-100 focus:outline-none focus:border-pink-500"
               >
-                <option value="gemini-3.8-flash">Gemini 3.8 Flash (Основная, мощный интеллект)</option>
-                <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Глубокие рассуждения и логика)</option>
-                <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (Сверхбыстрая)</option>
+                <optgroup label="OpenRouter (Подключено)">
+                  <option value="deepseek/deepseek-chat">DeepSeek Chat (V3) — Самая дешевая и умная ($0.14 / 1M)</option>
+                  <option value="deepseek/deepseek-r1">DeepSeek R1 — Продвинутые рассуждения и логика</option>
+                  <option value="qwen/qwen3.7-flash">Qwen 3.7 Flash — Ультрадешевая ($0.03 / 1M)</option>
+                  <option value="meta-llama/llama-3.3-70b-instruct">Llama 3.3 70B Instruct (Meta)</option>
+                  <option value="google/gemini-2.0-flash-001">Gemini 2.0 Flash (через OpenRouter)</option>
+                </optgroup>
+                <optgroup label="Google AI Studio">
+                  <option value="gemini-3.8-flash">Gemini 3.8 Flash (Google AI Studio Free Tier)</option>
+                  <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Google AI Studio)</option>
+                </optgroup>
               </select>
             </div>
 

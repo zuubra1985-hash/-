@@ -8,7 +8,8 @@ interface AgentHeaderProps {
   onOpenSettings: () => void;
   onClearChat: () => void;
   onTestTelegramSend: () => void;
-  geminiConnected: boolean;
+  geminiConnected?: boolean;
+  aiStatus?: { provider: string; model: string; connected: boolean };
 }
 
 export const AgentHeader: React.FC<AgentHeaderProps> = ({
@@ -17,9 +18,10 @@ export const AgentHeader: React.FC<AgentHeaderProps> = ({
   onOpenSettings,
   onClearChat,
   onTestTelegramSend,
-  geminiConnected
+  aiStatus
 }) => {
   const isTgConnected = config.telegramBot.isConnected;
+  const isAiActive = aiStatus?.connected ?? true;
 
   return (
     <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur-md sticky top-0 z-30 px-4 py-3 md:px-6">
@@ -46,7 +48,8 @@ export const AgentHeader: React.FC<AgentHeaderProps> = ({
                   AI Agent
                 </span>
               </h1>
-              <span className="hidden sm:inline-block text-xs font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700/60">
+              <span className="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-full bg-emerald-950/60 text-emerald-300 border border-emerald-500/30">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
                 {config.model}
               </span>
             </div>

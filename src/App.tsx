@@ -16,7 +16,8 @@ export default function App() {
 Ты на связи с ним и в Telegram, и на этом сайте.
 Твоя цель — помогать пользователю во всех делах: планировании, творчестве, написании текстов, кодинге, генерации идей, ответах на вопросы и просто душевных беседах.
 Общайся дружелюбно, умно, с поддержкой и уместным юмором. Запоминай всё, чем делится собеседник.`,
-    model: 'gemini-3.8-flash',
+    model: 'deepseek/deepseek-chat',
+    provider: 'openrouter',
     temperature: 0.7,
     telegramBot: {
       username: 'Milachudila_bot',
@@ -30,7 +31,11 @@ export default function App() {
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
-  const [geminiConnected, setGeminiConnected] = useState<boolean>(true);
+  const [aiStatus, setAiStatus] = useState<{ provider: string; model: string; connected: boolean }>({
+    provider: 'OpenRouter',
+    model: 'deepseek/deepseek-chat',
+    connected: true
+  });
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isSendingTest, setIsSendingTest] = useState<boolean>(false);
 
@@ -49,7 +54,7 @@ export default function App() {
           if (data.agentConfig) setConfig(data.agentConfig);
           if (data.messages) setMessages(data.messages);
           if (data.memories) setMemories(data.memories);
-          if (data.geminiConnected !== undefined) setGeminiConnected(data.geminiConnected);
+          if (data.aiStatus) setAiStatus(data.aiStatus);
         })
         .catch((err) => {
           console.info('State fetch cache fallback:', err);
@@ -147,6 +152,13 @@ export default function App() {
     }
   };
 
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 4000);
+  };
+
   // Send test push to Telegram
   const handleTestTelegramSend = async () => {
     setIsSendingTest(true);
@@ -160,19 +172,27 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok && data.error) {
-        alert(data.error);
+        showToast(data.error);
       } else {
-        alert('✅ Тестовое сообщение успешно отправлено в ваш Telegram!');
+        showToast('✅ Тестовое сообщение успешно отправлено в ваш Telegram!');
       }
     } catch (err: any) {
-      alert('Ошибка отправки: ' + (err?.message || err));
+      showToast('Ошибка отправки: ' + (err?.message || err));
     } finally {
       setIsSendingTest(false);
     }
   };
 
   return (
-    <div className="flex flex-col h-screen bg-[#0b0f17] text-slate-100 font-sans selection:bg-pink-500/30 selection:text-pink-200 overflow-hidden">
+    <div className="flex flex-col h-screen bg-[#0b0f17] text-slate-100 font-sans selection:bg-pink-500/30 selection:text-pink-200 overflow-hidden relative">
+      {/* Toast notification */}
+      {toastMessage && (
+        <div className="fixed top-16 right-4 z-50 bg-slate-900 border border-slate-700 text-slate-100 px-4 py-2.5 rounded-xl shadow-xl text-xs flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
+          <span>{toastMessage}</span>
+          <button onClick={() => setToastMessage(null)} className="text-slate-400 hover:text-white ml-2">✕</button>
+        </div>
+      )}
+
       {/* Top Navigation */}
       <AgentHeader
         config={config}
@@ -180,7 +200,7 @@ export default function App() {
         onOpenSettings={() => setIsSettingsOpen(true)}
         onClearChat={handleClearChat}
         onTestTelegramSend={handleTestTelegramSend}
-        geminiConnected={geminiConnected}
+        aiStatus={aiStatus}
       />
 
       {/* Telegram Live Connection Ribbon */}

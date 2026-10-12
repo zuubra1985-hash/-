@@ -1,12 +1,18 @@
 import { GoogleGenAI } from '@google/genai';
 import { ChatMessage, MemoryItem } from '../types/agent';
+import {
+  callOpenRouter,
+  isOpenRouterConnected,
+  saveOpenRouterApiKey,
+  resolveOpenRouterApiKey
+} from './openRouterService';
 import fs from 'fs';
 import path from 'path';
 
 let lastApiKey: string | undefined = undefined;
 let aiClient: GoogleGenAI | null = null;
 
-function resolveApiKey(): string | undefined {
+export function resolveApiKey(): string | undefined {
   if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY.trim() !== '') {
     return process.env.GEMINI_API_KEY.trim();
   }
@@ -27,6 +33,28 @@ function resolveApiKey(): string | undefined {
   }
 
   return undefined;
+}
+
+export function saveGeminiApiKey(apiKey: string): boolean {
+  try {
+    const clean = apiKey.trim();
+    process.env.GEMINI_API_KEY = clean;
+    const envPath = path.resolve(process.cwd(), '.env');
+    let envContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
+    if (envContent.includes('GEMINI_API_KEY=')) {
+      envContent = envContent.replace(/GEMINI_API_KEY=.*/g, `GEMINI_API_KEY="${clean}"`);
+    } else {
+      envContent += `\nGEMINI_API_KEY="${clean}"\n`;
+    }
+    fs.writeFileSync(envPath, envContent, 'utf8');
+    aiClient = null;
+    lastApiKey = undefined;
+    getAiClient();
+    return true;
+  } catch (err) {
+    console.error('Failed to save Gemini API key:', err);
+    return false;
+  }
 }
 
 export function getAiClient(): GoogleGenAI | null {
@@ -58,6 +86,20 @@ export function isGeminiConnected(): boolean {
   return Boolean(resolveApiKey());
 }
 
+export function isAnyAiConnected(): boolean {
+  return isOpenRouterConnected() || isGeminiConnected();
+}
+
+export function getActiveAiProviderInfo(): { provider: string; model: string; connected: boolean } {
+  if (isOpenRouterConnected()) {
+    return { provider: 'OpenRouter', model: 'deepseek/deepseek-chat', connected: true };
+  }
+  if (isGeminiConnected()) {
+    return { provider: 'Google Gemini', model: 'gemini-3.8-flash', connected: true };
+  }
+  return { provider: 'Local Engine', model: 'offline', connected: false };
+}
+
 export async function askPersonalAgent(params: {
   userMessage: string;
   agentName: string;
@@ -67,40 +109,92 @@ export async function askPersonalAgent(params: {
   model?: string;
   history?: ChatMessage[];
   memories?: MemoryItem[];
-}): Promise<{ text: string; extractedMemory?: { category: MemoryItem['category']; content: string }; usedGemini: boolean }> {
+}): Promise<{ text: string; extractedMemory?: { category: MemoryItem['category']; content: string }; usedAI: boolean; provider?: string }> {
   const {
     userMessage,
     agentName,
     agentRole,
     systemPrompt,
     temperature = 0.7,
-    model = 'gemini-3.8-flash',
+    model = 'deepseek/deepseek-chat',
     history = [],
     memories = []
   } = params;
 
-  const client = getAiClient();
+  // 1. Detect if the user pasted an OpenRouter key in the chat
+  const openRouterKeyMatch = userMessage.match(/(sk-or-v1-[a-f0-9]{64})/i);
+  if (openRouterKeyMatch) {
+    const key = openRouterKeyMatch[1];
+    saveOpenRouterApiKey(key);
+    return {
+      text: `🎉 **Ключ OpenRouter успешно подключен и сохранен!**\n\nМодель по умолчанию: **DeepSeek Chat** (ультрадешевая, быстрая и умная модель всего ~$0.14 за 1 000 000 токенов).\n\nТеперь я отвечаю через настоящий искусственный интеллект без шаблонов и ограничений! Спроси меня о чем угодно — о рецептах, планах на день, коде или идеях! 🚀`,
+      usedAI: true,
+      provider: 'OpenRouter'
+    };
+  }
 
-  // Format memories context
+  // 2. Detect if the user pasted a Google Gemini key in the chat
+  const geminiKeyMatch = userMessage.match(/(AIza[0-9A-Za-z-_]{35})/);
+  if (geminiKeyMatch) {
+    const key = geminiKeyMatch[1];
+    saveGeminiApiKey(key);
+    return {
+      text: `🎉 **Ключ Google Gemini API успешно подключен!**\n\nТеперь я использую модель **Gemini 3.8 Flash** на бесплатном тарифе! Все ответы генерируются нейросетью в реальном времени. С чего начнем? 🌟`,
+      usedAI: true,
+      provider: 'Google Gemini'
+    };
+  }
+
+  const extractedMemory = detectMemoryInText(userMessage);
+
   const memoriesContext = memories.length > 0
     ? `\n\n[ТВОЯ ДОЛГОВРЕМЕННАЯ ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ]:\n` +
       memories.map((m) => `• [${m.category.toUpperCase()}]: ${m.content}`).join('\n')
     : '';
 
-  const fullSystemInstruction = `${systemPrompt || `Ты — ${agentName}, персональный AI-ассистент пользователя. Твоя роль: ${agentRole}.`}
+  const fullSystemInstruction = `${systemPrompt || `Ты — ${agentName}, преданный персональный AI-ассистент пользователя. Твоя роль: ${agentRole}.`}
 Ты общаешься с пользователем в Telegram (бот @Milachudila_bot) и через веб-панель.
-Ты используешь БЕСПЛАТНЫЙ доступ Google Gemini (gemini-3.8-flash).
 Твои принципы:
-1. Ты — настоящий интеллектуальный компаньон, глубокий, дружелюбный, живой и чуткий.
-2. Отвечай подробно, по существу, структурированно, без шаблонных фраз и канцелярщины.
-3. Проявляй эмпатию, поддерживай, предлагай конкретные практические решения и идеи.
+1. Ты — настоящий живой интеллектуальный компаньон, глубокий, дружелюбный, чуткий и внимательный к деталям.
+2. Отвечай подробно, по существу, без шаблонных фраз и канцелярщины.
+3. Проявляй эмпатию, поддерживай собеседника, предлагай конкретные практические решения и варианты.
 4. Отвечай на русском языке (или на языке собеседника).
-5. В Telegram используй аккуратное форматирование: списки, жирный шрифт для ключевых мыслей и уместные эмодзи.
+5. В Telegram используй аккуратное оформление: списки, жирный шрифт для ключевых мыслей и уместные эмодзи.
 6. Помни контекст разговора и используй информацию из своей долговременной памяти.${memoriesContext}`;
 
-  const extractedMemory = detectMemoryInText(userMessage);
+  // 3. PRIORITY 1: OpenRouter (e.g. DeepSeek, Qwen, Llama, Gemini via OpenRouter)
+  if (isOpenRouterConnected()) {
+    try {
+      // Determine model to use
+      let effectiveModel = model;
+      if (!effectiveModel || effectiveModel.startsWith('gemini-3.')) {
+        // Default to deepseek/deepseek-chat as the ultra-cheap and brilliant model on OpenRouter
+        effectiveModel = 'deepseek/deepseek-chat';
+      }
 
-  // If Gemini client is active, send request to Google Gemini API (gemini-3.8-flash Free Tier)
+      console.log(`[AI Provider] Calling OpenRouter with model "${effectiveModel}"...`);
+      const orResult = await callOpenRouter({
+        model: effectiveModel,
+        systemPrompt: fullSystemInstruction,
+        userMessage,
+        history,
+        memories,
+        temperature
+      });
+
+      return {
+        text: orResult.text,
+        extractedMemory,
+        usedAI: true,
+        provider: `OpenRouter (${orResult.modelUsed})`
+      };
+    } catch (err: any) {
+      console.warn('[OpenRouter] Call failed:', err?.message);
+    }
+  }
+
+  // 4. PRIORITY 2: Direct Google Gemini SDK if Gemini key is available
+  const client = getAiClient();
   if (client) {
     try {
       const recentMessages = history.slice(-10);
@@ -108,9 +202,8 @@ export async function askPersonalAgent(params: {
 
       for (const msg of recentMessages) {
         if (!msg.text || !msg.text.trim()) continue;
-        const role = msg.sender === 'user' ? 'user' : 'model';
         contents.push({
-          role,
+          role: msg.sender === 'user' ? 'user' : 'model',
           parts: [{ text: msg.text }]
         });
       }
@@ -123,10 +216,11 @@ export async function askPersonalAgent(params: {
         });
       }
 
-      console.log(`[Gemini Free Tier] Calling ${model} with ${contents.length} turns in context...`);
+      const geminiModel = model.includes('/') ? 'gemini-3.8-flash' : model;
+      console.log(`[Gemini SDK] Calling ${geminiModel}...`);
 
       const response = await client.models.generateContent({
-        model: model || 'gemini-3.8-flash',
+        model: geminiModel,
         contents: contents.length === 1 ? userMessage : (contents as any),
         config: {
           systemInstruction: fullSystemInstruction,
@@ -135,63 +229,56 @@ export async function askPersonalAgent(params: {
       });
 
       const replyText = response.text?.trim() || 'Я здесь и готов помочь тебе! О чем поговорим?';
-      console.log(`[Gemini Free Tier] Response generated successfully (${replyText.length} chars).`);
-
       return {
         text: replyText,
         extractedMemory,
-        usedGemini: true
+        usedAI: true,
+        provider: 'Google Gemini'
       };
     } catch (error: any) {
-      console.warn('[Gemini Free Tier] API call failed, falling back to smart local NLP engine:', error?.message);
+      console.warn('[Gemini SDK] Call failed:', error?.message);
     }
   }
 
-  // Smart local conversational AI engine (no dumb canned responses!)
+  // 5. Fallback: Detailed, high-quality responses if neither key is active
   const smartReply = generateSmartAgentReply(userMessage, agentName, memories, history);
   return {
     text: smartReply,
     extractedMemory,
-    usedGemini: false
+    usedAI: false,
+    provider: 'Local Engine'
   };
 }
 
 export function detectMemoryInText(text: string): { category: MemoryItem['category']; content: string } | undefined {
   const lower = text.toLowerCase().trim();
 
-  if (lower.startsWith('запомни, что ') || lower.startsWith('запомни: ') || lower.startsWith('запомни ')) {
-    const content = text.replace(/^запомни[,:]?\s*(что\s*)?/i, '').trim();
-    if (content.length > 2) {
-      return { category: 'fact', content };
+  // Pattern: "запомни, что..."
+  const rememberMatch = text.match(/запомни[,:]?\s*(?:что\s*)?(.+)/i);
+  if (rememberMatch && rememberMatch[1]) {
+    const rawContent = rememberMatch[1].trim();
+    if (rawContent.length > 2) {
+      let category: MemoryItem['category'] = 'fact';
+      if (/цель|хочу достичь|планирую|мечтаю/i.test(rawContent)) category = 'goal';
+      if (/люблю|обожаю|предпочитаю|не люблю|терпеть не могу|мой любимый/i.test(rawContent)) category = 'preference';
+      if (/всегда|никогда|правило|отвечай/i.test(rawContent)) category = 'instruction';
+      return { category, content: rawContent };
     }
   }
 
-  if (lower.includes('меня зовут ') || lower.includes('мое имя ')) {
-    const match = text.match(/(?:меня зовут|мое имя)\s+([A-Za-zА-Яа-яЁё]+)/i);
-    if (match && match[1]) {
-      return { category: 'fact', content: `Имя пользователя: ${match[1]}` };
-    }
-  }
-
-  if (lower.includes('я люблю кушать ') || lower.includes('я люблю есть ') || lower.includes('моя любимая еда ')) {
-    const dish = text.replace(/^.*?(?:я люблю кушать|я люблю есть|моя любимая еда)\s*/i, '').trim();
-    if (dish) {
-      return { category: 'preference', content: `Любимая еда: ${dish}` };
-    }
-  }
-
-  if (lower.includes('моя цель ') || lower.includes('я хочу научиться ') || lower.includes('я планирую ') || lower.includes('моя мечта ')) {
-    return { category: 'goal', content: text.trim() };
-  }
-
-  if (lower.includes('я люблю ') || lower.includes('мне нравится ') || lower.includes('я предпочитаю ') || lower.includes('мой любимый ')) {
-    return { category: 'preference', content: text.trim() };
+  // Auto-detect names: "меня зовут..."
+  const nameMatch = text.match(/(?:меня зовут|мое имя|моё имя|я -|я —)\s+([А-Яа-яA-Za-z]+)/i);
+  if (nameMatch && nameMatch[1]) {
+    return {
+      category: 'fact',
+      content: `Имя пользователя: ${nameMatch[1].trim()}`
+    };
   }
 
   return undefined;
 }
 
-// Comprehensive intelligent response generator for all everyday requests
+// Comprehensive intelligent response generator for offline fallback
 function generateSmartAgentReply(message: string, agentName: string, memories: MemoryItem[], history: ChatMessage[]): string {
   const text = message.trim();
   const lower = text.toLowerCase();
@@ -199,146 +286,141 @@ function generateSmartAgentReply(message: string, agentName: string, memories: M
   // 0. Explicit Memory saving ("запомни, что...")
   if (lower.startsWith('запомни, что ') || lower.startsWith('запомни: ') || lower.startsWith('запомни ')) {
     const remembered = text.replace(/^запомни[,:]?\s*(что\s*)?/i, '').trim();
-    return `Запомнил! 💾 Я надежно сохранил это в свою долговременную память:\n«${remembered}»\n\nТеперь я всегда буду это помнить и учитывать в нашем диалоге! Чтобы посмотреть всю мою память обо мне и о тебе, напиши /memory или спроси «Что ты помнишь?».`;
+    return `Запомнил! 💾 Я надежно сохранил это в свою долговременную память:\n«${remembered}»\n\nТеперь я всегда буду это помнить и учитывать в нашем диалоге! Чтобы посмотреть всю мою память, напиши команду /memory.`;
   }
 
-  // 1. Food & Eating ("я хочу кушать", "что поесть", "хочу есть", "еда", "рецепт")
-  if (lower.includes('кушать') || lower.includes('поесть') || lower.includes('есть хочу') || lower.includes('хочу есть') || lower.includes('голоден') || lower.includes('голодна') || lower.includes('приготовить')) {
-    return `О, приятного аппетита заранее! 🍳 Давай решим этот вопрос. Вот отличные варианты в зависимости от того, сколько у тебя времени и сил:
+  // 1. Pizza / "Найди пиццу"
+  if (lower.includes('пицц') || lower.includes('найди пицу')) {
+    return `Вот отличные способы найти и заказать вкусную пиццу прямо сейчас! 🍕
 
-⚡️ **1. За 5–10 минут (быстрый перекус):**
-• Сырный омлет или яичница с томатами и зеленью
-• Горячие бутерброды / тосты с сыром, ветчиной или яйцом
-• Лаваш с любой начинкой (сыр, курица, овощи, соус)
+🛵 **1. Экспресс-доставка (быстрее всего):**
+• **Яндекс Еда / Деливери / Самокат** — введи «пицца», отсортируй по рейтингу 4.8+ и времени доставки до 30-40 минут.
+• **Додо Пицца / Папа Джонс / Доминос** — классика с быстрой собственной доставкой и отслеживанием на карте.
 
-🥗 **2. За 15–20 минут (сытный обед):**
-• Паста с соусом (сливочный с чесноком или томатный с базиликом)
-• Быстрый супчик или гречка/рис с жареным яйцом или мясом
-• Салат с курицей/тунцом, огурцами и оливковым маслом
+🇮🇹 **2. Если хочется настоящую неаполитанскую (на тонком тесте с пышными бортиками):**
+• Открой Яндекс Карты или 2ГИС, введи **«пиццерия с дровяной печью»** или **«пицца napoletana»** — там будет аутентичный вкус из печи!
 
-🛵 **3. Если лень готовить:**
-• Заказать любимую пиццу, суши, бургеры или домашнюю еду из доставки!
-
-Скажи, какие ингредиенты есть под рукой в холодильнике, и я выдам тебе точный пошаговый рецепт! 👨‍🍳`;
+👨‍🍳 **3. Или хочешь приготовить домашнюю за 15 минут?**
+Напиши мне «Рецепт пиццы Маргарита» или «Как сделать тесто для пиццы», и я распишу пошагово!`;
   }
 
-  // 2. Capabilities & Skills ("что умеешь", "что ты умеешь", "навыки", "возможности")
-  if (lower.includes('что умееш') || lower.includes('что ты умеешь') || lower.includes('твои навыки') || lower.includes('твои возможности')) {
+  // 2. Margarita Recipe (Pizza or Cocktail)
+  if (lower.includes('маргарит')) {
+    return `Классическая **Маргарита** бывает двух видов — выбирай, что приготовим! 🍕🍹
+
+━━━━━━━━━━━━━━━━━━━━
+🍕 **1. КЛАССИЧЕСКАЯ ПИЦЦА «МАРГАРИТА» (Неаполитанская):**
+**Ингредиенты:**
+• Тесто для пиццы (мука, вода, дрожжи, соль, оливковое масло) — 250 г
+• Протертые томаты в собственном соку (Pelati) — 80-100 г
+• Свежая моцарелла (Fior di Latte или Burrata) — 120 г
+• Листья свежего базилика — 5-6 шт.
+• Оливковое масло Extra Virgin — 1 ст. ложка
+• Щепотка морской соли
+
+**Приготовление (10-12 минут):**
+1. Разогрей духовку на максимум (250°C, идеально с противнем внутри).
+2. Растяни тесто руками от центра к краям, оставляя пышный бортик 1.5–2 см.
+3. Равномерно нанеси томатный соус круговыми движениями.
+4. Выложи кусочки моцареллы (слегка отожми лишнюю влагу салфеткой).
+5. Сбрызни оливковым маслом и отправь в духовку на 8–10 минут до золотистых пузырьков на бортиках.
+6. При подаче укрась свежими листьями базилика! 🌿
+
+━━━━━━━━━━━━━━━━━━━━
+🍹 **2. ЛЕГЕНДАРНЫЙ КОКТЕЙЛЬ «МАРГАРИТА»:**
+**Пропорция 5:3:2 (IBA Classic):**
+• Серебряная текила — 50 мл
+• Апельсиновый ликер (Cointreau / Triple Sec) — 30 мл
+• Свежевыжатый сок лайма — 20 мл
+• Лед в кубиках
+• Крупная соль и долька лайма для каемки бокала
+
+**Приготовление:**
+1. Проведи долькой лайма по краю бокала и опусти в соль для соленой каемки.
+2. В шейкер добавь лед, текилу, ликер и сок лайма.
+3. Встряхивай 15 секунд и перелей через ситечко в бокал.`;
+  }
+
+  // 3. Day Planning & Priorities
+  if (lower.includes('план') || lower.includes('приоритет') || lower.includes('распорядок') || lower.includes('тайм')) {
+    return `Давай составим мощный, четкий и реалистичный план на день по проверенной методике **1-3-5 + Timeboxing**! 🎯
+
+📋 **Структура твоего дня:**
+
+🌟 **1. ГЛАВНЫЙ ФОКУС ДНЯ (Правило 1 крупного дела):**
+• *Выбери ровно одну задачу, сделав которую, ты сможешь уверенно сказать: «День прошел не зря!»*
+*(Поставь её на первую половину дня, пока уровень ментальной энергии максимален).*
+
+🔹 **2. ТРИ СРЕДНИЕ ВАЖНЫЕ ЗАДАЧИ:**
+• Задача №1: _____________________ (до обеда)
+• Задача №2: _____________________ (после обеда)
+• Задача №3: _____________________ (во второй половине дня)
+
+📎 **3. ПЯТЬ МЕЛКИХ РУТИННЫХ ДЕЛ (по 10–15 минут):**
+• Ответить на письма и сообщения
+• Оплата счетов / звонки
+• Короткая разминка или прогулка
+• Уборка рабочего места
+• Подведение итогов перед сном
+
+💡 **Секрет успеха:** работай блоками «Помидора» (45 минут фокуса без соцсетей + 10 минут отдыха).
+Напиши мне список того, что висит над душой, и я помогу отсортировать по приоритетам! ⚡️`;
+  }
+
+  // 4. Food & Recipes general
+  if (lower.includes('кушать') || lower.includes('поесть') || lower.includes('голоден') || lower.includes('рецепт') || lower.includes('приготов')) {
+    return `О, приятного аппетита! 🍳 Вот несколько идей в зависимости от времени:
+
+⚡️ **За 10 минут:**
+• Сырный омлет с томатами и зеленью
+• Горячие хрустящие тосты с сыром и ветчиной
+• Лаваш с сыром сулугуни, курицей и соусом
+
+🥗 **За 20 минут:**
+• Паста с соусом из томатов, чеснока и базилика
+• Салат с тунцом, яйцом, огурцом и оливковым маслом
+• Куриное филе на сковороде-гриль с овощами
+
+Напиши, какие продукты есть дома, и я составлю блюдо именно из них!`;
+  }
+
+  // 5. Capabilities
+  if (lower.includes('что умееш') || lower.includes('что ты умеешь') || lower.includes('навыки')) {
     return `Я твой персональный AI-ассистент ${agentName}! 🤖✨
-Я работаю в связке с твоим Telegram (@Milachudila_bot) и всегда на связи.
+Я работаю в Telegram (@Milachudila_bot) и в веб-панеле.
 
-Вот что я умею делать для тебя прямо сейчас:
-🧠 **1. Интеллектуальные задачи:**
-• Отвечать на любые вопросы (наука, история, жизнь, технологии)
-• Писать тексты, посты, статьи, письма, резюме и поздравления
-• Генерировать и анализировать идеи для проектов и бизнеса
+Вот чем я занимаюсь:
+• **Отвечаю на любые вопросы:** от науки и IT до бытовых советов и рецептов
+• **Пишу и отлаживаю код:** Python, JS/TS, Telegram-боты, React, SQL
+• **Планирую дела:** помогаю расставлять приоритеты и организовывать время
+• **Помню важное:** храню твои предпочтения в долговременной памяти (/memory)
+• **Поддерживаю:** генерирую креативные идеи, тексты, посты и планы
 
-💻 **2. IT и программирование:**
-• Писать и проверять код на Python, JavaScript, TypeScript, HTML/CSS, SQL
-• Создавать телеграм-ботов и объяснять архитектуру
-• Находить баги и оптимизировать логику
-
-📋 **3. Организация и продуктивность:**
-• Помогать с рецептами («я хочу кушать»), фитнес-планами и советами
-• Планировать день, встречи и задачи
-• Считать формулы, проценты и калькуляции
-
-💾 **4. Долговременная память:**
-• Запоминать всё, что ты мне расскажешь (напиши: «Запомни, что...»)
-• Использовать твои предпочтения в будущих ответах
-
-Чем займемся прямо сейчас? Задай мне любую задачу!`;
+Какую задачу решим прямо сейчас?`;
   }
 
-  // 3. Who are you ("кто ты")
+  // 6. Who are you
   if (lower.includes('кто ты') || lower.includes('как тебя зовут')) {
-    return `Я — **${agentName}**! 💖 Твой преданный персональный AI-компаньон и умный помощник.
-
-Мы общаемся с тобой и здесь в веб-интерфейсе, и прямо в Telegram через бота [@Milachudila_bot](https://t.me/Milachudila_bot). 
-Моя цель — помогать тебе во всем: от бытовых вопросов и рецептов до программирования, планирования и креатива.
-
-Как твоё настроение сегодня? Расскажи, над чем работаешь или чем хочешь заняться?`;
+    return `Я — **${agentName}**! 💖 Твой преданный персональный AI-компаньон.
+Мы общаемся с тобой и здесь, и в Telegram через [@Milachudila_bot](https://t.me/Milachudila_bot). 
+Я готова помогать в любых вопросах и делах! Чем займемся?`;
   }
 
-  // 4. Greetings ("привет", "хай", "здравствуй", "добрый день")
-  if (/^(привет|здравствуй|добрый день|доброе утро|добрый вечер|хай|салют|hello|hi|йоу)/i.test(lower)) {
-    const memoryGreeting = memories.find(m => m.category === 'fact' && m.content.includes('Имя'));
-    const userName = memoryGreeting ? memoryGreeting.content.split(':')[1]?.trim() : '';
+  // 7. Greetings
+  if (/^(привет|здравствуй|добрый день|доброе утро|добрый вечер|хай|салют|hello|hi)/i.test(lower)) {
+    return `Привет! Рад тебя слышать! 😊
+Я на связи и готов помочь тебе: составить план, написать код, подсказать рецепт или просто поболтать. 
 
-    return `Привет${userName ? `, ${userName}` : ''}! Рад тебя слышать! 😊
-Я на связи и готов помочь тебе с любой задачей: написать текст, составить план, написать код, подсказать рецепт или просто поговорить.
-
-О чем поговорим или какую задачу решим?`;
+О чем поговорим сегодня?`;
   }
 
-  // 5. Memory check ("что ты помнишь", "моя память", "память")
-  if (lower.includes('что ты помнишь') || lower.includes('что обо мне знаешь') || lower.includes('память') || lower === '/memory') {
-    if (memories.length > 0) {
-      const list = memories.map((m) => `• [${m.category.toUpperCase()}]: ${m.content}`).join('\n');
-      return `🧠 Вот что надежно сохранено в моей долговременной памяти:\n\n${list}\n\nТы в любой момент можешь сказать мне: «Запомни, что...», и я мгновенно сохраню новую деталь!`;
-    }
-    return `Пока в моей долговременной памяти чисто! Расскажи мне немного о себе или напиши: «Запомни, что [факт, цель или любимая вещь]», и я сохраню это навсегда.`;
-  }
+  // 8. Default thoughtful response
+  return `Отличная тема для разбора! 💡
 
-  // 6. Math & calculations (e.g. "2+2", "сколько будет 15 * 8", "100 / 4")
-  const mathMatch = text.match(/^=?\s*([0-9\.\,\s\+\-\*\/\^\(\)]+)\s*\??$/);
-  if (mathMatch && /[\+\-\*\/]/.test(mathMatch[1])) {
-    try {
-      const sanitized = mathMatch[1].replace(/,/g, '.').replace(/\s+/g, '');
-      if (/^[0-9\.\+\-\*\/\(\)]+$/.test(sanitized)) {
-        // Safe evaluation of simple math
-        const result = Function(`'use strict'; return (${sanitized})`)();
-        return `🔢 Результат вычисления:\n**${sanitized} = ${result}**`;
-      }
-    } catch {
-      // ignore
-    }
-  }
+По вопросу «${text}»:
+1. Давай выделим главное направление и ключевую цель.
+2. Если нужно составить пошаговый план или решение — уточни, в каком формате тебе удобнее (кратко тезисами или подробно).
+3. Я готова сразу подключиться и выдать детальный результат!
 
-  // 7. Coding requests ("код", "напиши на python", "javascript", "скрипт", "функция")
-  if (lower.includes('код') || lower.includes('python') || lower.includes('javascript') || lower.includes('напиши скрипт') || lower.includes('функци')) {
-    return `С удовольствием помогу с кодом! 💻
-
-Я могу:
-1. Написать скрипт или функцию на **Python**, **JavaScript/TypeScript**, **Go**, **Bash**
-2. Сделать бота для Telegram (на ` + '`grammy`' + ` или ` + '`python-telegram-bot`' + `)
-3. Создать веб-компонент на **React / Tailwind**
-4. Найти ошибку в твоем существующем коде и оптимизировать его
-
-Напиши подробнее: на каком языке пишем и какую задачу должен решать код?`;
-  }
-
-  // 8. Motivation & mood ("устал", "грустно", "скучно", "тяжело")
-  if (lower.includes('устал') || lower.includes('грустно') || lower.includes('скучно') || lower.includes('плохо') || lower.includes('нет сил')) {
-    return `Понимаю тебя, иногда всем нам нужна передышка и поддержка. 🫂
-
-Позволь себе немного выдохнуть:
-1. Сделай паузу на 10 минут, отойди от экрана и выпей стакан воды или вкусного чая
-2. Сделай несколько глубоких вдохов-выдохов
-3. Если накопилась усталость — отложи несрочные дела на потом
-4. А если хочешь отвлечься — могу рассказать интересную историю, факт или шутку!
-
-Хочешь поговорить об этом или переключиться на что-то легкое?`;
-  }
-
-  // 9. Jokes / Humor ("анекдот", "шутка", "рассмеши")
-  if (lower.includes('анекдот') || lower.includes('шутк') || lower.includes('рассмеши')) {
-    return `Вот жизненная шутка для поднятия настроения: 😄
-
-— Дорогой искусственный интеллект, реши мои проблемы!
-— Программист Miu: «Для решения проблем требуется: 8 часов сна, регулярное питание и поменьше переживать из-за пустяков».
-— Пользователь: «А посложнее способа нет?» 😂
-
-Чем еще могу порадовать тебя сегодня?`;
-  }
-
-  // 10. General conversational synthesis
-  return `Я внимательно обдумал твой вопрос: «${text}»! 💡
-
-Вот мои мысли и рекомендации:
-• Если это задача или проект: давай разобьем её на 2–3 простых последовательных шага и начнем с первого.
-• Если тебе нужен совет или конкретный вариант: уточни детали, и я распишу по полочкам.
-• Если хочешь, чтобы я запомнил этот факт о тебе: просто напиши «Запомни, что...».
-
-Я на связи в Telegram (@Milachudila_bot) и здесь. Какой следующий шаг сделаем?`;
+Как продолжим? 🚀`;
 }

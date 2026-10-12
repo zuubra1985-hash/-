@@ -4,7 +4,8 @@ export interface AgentConfig {
   avatar: string;
   role: string;
   systemPrompt: string;
-  model: 'gemini-3.8-flash' | 'gemini-3.1-pro-preview' | 'gemini-3.1-flash-lite' | string;
+  model: 'deepseek/deepseek-chat' | 'deepseek/deepseek-r1' | 'qwen/qwen3.7-flash' | 'meta-llama/llama-3.3-70b-instruct' | 'google/gemini-2.0-flash-001' | 'gemini-3.8-flash' | string;
+  provider?: 'openrouter' | 'gemini' | 'auto';
   temperature: number;
   telegramBot: {
     username: string;
